@@ -5,7 +5,6 @@ import android.os.Bundle;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
-import android.view.View;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -15,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 import androidx.core.view.GravityCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
+import androidx.lifecycle.ViewModelProvider;
 import androidx.viewpager.widget.ViewPager;
 
 import com.google.android.material.navigation.NavigationView;
@@ -35,14 +35,19 @@ import cn.settile.fanboxviewer.Fragments.Main.MessageFragment;
 import cn.settile.fanboxviewer.Fragments.Main.SubscPostFragment;
 import cn.settile.fanboxviewer.Network.Common;
 import cn.settile.fanboxviewer.Network.RESTfulClient.FanboxParser;
-import okhttp3.Request;
-import okhttp3.Response;
+import cn.settile.fanboxviewer.Network.URLRequestor;
+import cn.settile.fanboxviewer.ViewModels.MainViewModel;
 
 
 public class MainActivity extends AppCompatActivity
         implements NavigationView.OnNavigationItemSelectedListener {
+
+    final static String TAG = "MainActivity";
     static boolean flag = false;
-    MainActivity c;
+    MainViewModel viewModel = null;
+
+
+    MainActivity ctx;
     AllPostFragment allPostFragment;
     private MainFragmentAdapter tabPageAdapter;
     private TabLayout tl;
@@ -50,10 +55,12 @@ public class MainActivity extends AppCompatActivity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        c = this;
+        ctx = this;
 
-        setContentView(R.layout.activity_main_page);
+        setContentView(R.layout.activity_main);
 
+
+        prepareUIAndActions();
 
         setTitle(R.string.app_name);
         Toolbar toolbar = findViewById(R.id.toolbar);
@@ -93,16 +100,21 @@ public class MainActivity extends AppCompatActivity
 
         setResult(-1);
         if (!getIntent().getBooleanExtra("NO_NETWORK", false)) {
-            if (getIntent().getBooleanExtra("isLoggedIn", false)) {
+            if (getIntent().getBooleanExtra("IS_LOGGED_IN", false)) {
+                viewModel.update_is_logged_in(true);
                 fetchUserInfo();
                 new Thread(() -> {
                     getNotifications(messageFragment);
                     allPostFragment.updateList(FanboxParser.getAllPosts(false, this), FanboxParser.getPlans(), true);
                     subscPostFragment.updateList(FanboxParser.getSupportingPosts(false, this), true);
                 }).start();
-            }
-        } else {
 
+            } else {
+                viewModel.update_is_logged_in(false);
+            }
+            viewModel.update_is_online(true);
+        } else {
+            viewModel.update_is_online(false);
         }
 
 
@@ -127,49 +139,83 @@ public class MainActivity extends AppCompatActivity
         });
     }
 
+
+    void prepareUIAndActions() {
+
+        viewModel = new ViewModelProvider(this).get(MainViewModel.class);
+
+        viewModel.is_logged_in().observe(this, (it) -> {
+            Log.i(TAG, it.toString());
+            NavigationView navV = (NavigationView) ctx.findViewById(R.id.nav_view);
+            TextView usernameV = (TextView) navV.getHeaderView(0).findViewById(R.id.main_drawer_username);
+            TextView useridV = (TextView) navV.getHeaderView(0).findViewById(R.id.main_drawer_userid);
+            if (!it) {
+                usernameV.setOnClickListener((v) -> {
+                    callLogin();
+                });
+                useridV.setOnClickListener((v) -> {
+                    callLogin();
+                });
+            }
+        });
+        viewModel.getUser_id().observe(this, (it) -> {
+            NavigationView navV = (NavigationView) ctx.findViewById(R.id.nav_view);
+            TextView useridV = (TextView) navV.getHeaderView(0).findViewById(R.id.main_drawer_userid);
+            useridV.setText(Objects.equals(it, "") ? getText(R.string.nav_header_subtitle) : it);
+        });
+        viewModel.getUser_name().observe(this, (it) -> {
+            NavigationView navV = (NavigationView) ctx.findViewById(R.id.nav_view);
+            TextView usernameV = (TextView) navV.getHeaderView(0).findViewById(R.id.main_drawer_username);
+            usernameV.setText(Objects.equals(it, "") ? getText(R.string.nav_header_title) : it);
+        });
+
+        viewModel.getUser_icon_url().observe(this, (it) -> {
+            if (!Objects.equals(it, "")) Picasso.get()
+                    .load(it)
+                    .placeholder(R.drawable.ic_settings_system_daydream_black_24dp)
+                    .resize(180, 180)
+                    .into((ImageView) findViewById(R.id.userIcon));
+        });
+    }
+
+    ;
+
+
     private void getNotifications(MessageFragment mf) {
         mf.update(true);
     }
 
     private void fetchUserInfo() {
         new Thread(() -> {
-            Request req = new Request.Builder()
-                    .url("https://www.pixiv.net/fanbox/")
-                    .build();
-            try (Response resp = Common.client.newCall(req).execute()) {
-                Document document = Jsoup.parse(resp.body().string());
-                Element metadata = document.getElementById("metadata");
-                String jsonStr = metadata.attr("content");
+            new URLRequestor("https://fanbox.cc/", (it) -> {
+                try {
+                    Document document = Jsoup.parse(it.body().string());
+                    Element metadata = document.getElementById("metadata");
+                    //TODO (fix this parser) : bug
+                    String jsonStr = metadata.attr("content");
 
-                Common.userInfo = new JSONObject(jsonStr);
-                JSONObject user = Common.userInfo.getJSONObject("context").getJSONObject("user");
-                String iconUrl = user.getString("iconUrl");
-                String userName = user.getString("name");
-                String userId = user.getString("userId");
+                    Common.userInfo = new JSONObject(jsonStr);
+                    JSONObject user = Common.userInfo.getJSONObject("context").getJSONObject("user");
+                    String iconUrl = user.getString("iconUrl");
+                    String userName = user.getString("name");
+                    String userId = user.getString("userId");
 
-                int unread = FanboxParser.getUnreadMessagesCount();
+                    int unread = FanboxParser.getUnreadMessagesCount();
 
-                runOnUiThread(() -> {
-                    TextView textView = findViewById(R.id.userName);
-                    textView.setText(userName);
-                    textView = findViewById(R.id.userId);
-                    textView.setText(userId);
+                    runOnUiThread(() -> {
+                        viewModel.update_user_info(userName, userId, iconUrl);
+                        if (unread != 0) {
+                            Objects.requireNonNull(tl.getTabAt(2))
+                                    .getOrCreateBadge().setNumber(unread);
+                        }
+                    });
+                } catch (Exception ex) {
+                    runOnUiThread(() -> Toast.makeText(getBaseContext(), "Can't get user info.\n" + ex.getMessage(), Toast.LENGTH_LONG).show());
+                    Log.e("MainActivity", "fetchUserInfo: ", ex);
+                }
+                return null;
+            },null);
 
-                    Picasso.get()
-                            .load(iconUrl)
-                            .placeholder(R.drawable.load_24dp)
-                            .resize(200, 200)
-                            .into((ImageView) findViewById(R.id.userIcon));
-
-                    if (unread != 0) {
-                        Objects.requireNonNull(tl.getTabAt(2))
-                                .getOrCreateBadge().setNumber(unread);
-                    }
-                });
-            } catch (Exception ex) {
-                runOnUiThread(() -> Toast.makeText(getBaseContext(), "Can't get user info.\n" + ex.getMessage(), Toast.LENGTH_LONG).show());
-                Log.e("MainActivity", "fetchUserInfo: ", ex);
-            }
         }).start();
     }
 
@@ -221,7 +267,8 @@ public class MainActivity extends AppCompatActivity
         } else if (id == R.id.nav_search) {
             Toast.makeText(this, "Search", Toast.LENGTH_SHORT).show();
         } else if (id == R.id.nav_settings) {
-            Toast.makeText(this, "Settings", Toast.LENGTH_SHORT).show();
+            //TODO (SettingsActivity)
+            //callSettings();
         } else if (id == R.id.nav_logout) {
             Toast.makeText(this, "Logout", Toast.LENGTH_SHORT).show();
         } else if (id == R.id.nav_recommend) {
@@ -233,8 +280,12 @@ public class MainActivity extends AppCompatActivity
     }
 
     @Contract("_->null")
-    public void callLogin(View view) {
+    public void callLogin() {
         Intent intent = new Intent(this, LoginActivity.class);
-        startActivityForResult(intent, -1);
+        if (!viewModel.is_logged_in().getValue()) startActivityForResult(intent, -1);
+    }
+    public void callSettings(){
+        Intent intent = new Intent(this, SettingsActivity.class);
+        startActivity(intent);
     }
 }
